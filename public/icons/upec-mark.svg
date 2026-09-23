@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="UPEC emblem">
+  <rect width="512" height="512" rx="116" fill="#10284b"/>
+  <circle cx="256" cy="246" r="169" fill="none" stroke="#d3a959" stroke-width="9" opacity=".9"/>
+  <circle cx="256" cy="246" r="146" fill="#173a66"/>
+  <path d="M256 153c-42-30-92-34-134-21v151c47-11 91-3 134 29 43-32 87-40 134-29V132c-42-13-92-9-134 21Z" fill="#eaf4f2"/>
+  <path d="M256 153v159M135 147c37-8 78 0 109 19m24 0c31-19 72-27 109-19" fill="none" stroke="#b9d8d2" stroke-width="8" stroke-linecap="round"/>
+  <path d="M256 312c-39-25-81-35-124-28 31 26 73 40 124 41 51-1 93-15 124-41-43-7-85 3-124 28Z" fill="#2aa97c"/>
+  <path d="M256 103l7 17 18 1-14 12 5 18-16-10-16 10 5-18-14-12 18-1 7-17Z" fill="#d8b56d"/>
+  <path d="M190 378h132" stroke="#d8b56d" stroke-width="8" stroke-linecap="round"/>
+  <path d="M220 395h72" stroke="#d8b56d" stroke-width="6" stroke-linecap="round"/>
+</svg>
