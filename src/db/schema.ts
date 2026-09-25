@@ -12,7 +12,7 @@ export const users = pgTable("users", {
   lockedUntil: timestamp("locked_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
-  check("users_role_check", sql`${table.role} in ('admin', 'accountant', 'viewer')`),
+  check("users_role_check", sql`${table.role} in ('admin', 'director', 'finance_officer', 'viewer')`),
   check("users_failed_attempts_check", sql`${table.failedLoginAttempts} >= 0`),
 ]);
 

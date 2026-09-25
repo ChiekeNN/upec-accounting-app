@@ -1,4 +1,6 @@
-export type Role = "admin" | "accountant" | "viewer";
+import type { Role } from "@/lib/roles";
+
+export type { Role };
 export type AccountCategory = "asset" | "liability" | "equity" | "income" | "expense";
 export type TransactionType = "income" | "expense" | "transfer" | "journal" | "reversal";
 export type TransactionStatus = "draft" | "posted" | "reversed";
@@ -18,6 +20,8 @@ export interface AccountItem {
   description: string;
   isActive: boolean;
   balance: number;
+  /** True once the account carries journal lines, which locks its category. */
+  hasEntries: boolean;
 }
 
 export interface JournalLineItem {

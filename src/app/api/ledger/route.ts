@@ -4,17 +4,17 @@ import { accounts, auditLogs, budgets, journalLines, sessions, transactions, use
 import { canWrite, errorResponse, getCurrentUser, hashPassword, isAdmin, isSameOrigin, verifyPassword } from "@/lib/auth";
 import { getSnapshot } from "@/lib/ledger";
 import { ensureSeed } from "@/lib/seed";
-import { and, eq } from "drizzle-orm";
+import { assignableRoles, isOwner, normaliseRole, roleLabel } from "@/lib/roles";
+import { and, eq, ne } from "drizzle-orm";
 import type { SessionUser } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
+const ACCOUNT_CATEGORIES = ["asset", "liability", "equity", "income", "expense"];
+
 class ActionError extends Error {
   constructor(message: string, public status = 400) { super(message); }
 }
-const assert = (condition: unknown, message: string, status = 400): asserts condition => {
-  if (!condition) throw new ActionError(message, status);
-};
 function text(value: unknown, max: number, label: string, required = true) {
   const result = typeof value === "string" ? value.trim() : "";
   if (required && !result) throw new ActionError(`${label} is required.`);
@@ -37,24 +37,31 @@ function validDate(value: unknown) {
   return date;
 }
 function reference(date: string) { return `UPEC-${date.slice(0, 4)}-${randomBytes(5).toString("hex").toUpperCase()}`; }
+
+/**
+ * Administrator, Director and Finance Officer may all create and correct
+ * financial records — that is what lets a Finance Officer fix a mistake
+ * without escalating it.
+ */
 function requireWriter(user: SessionUser) { if (!canWrite(user)) throw new ActionError("You do not have permission to modify financial records.", 403); }
-function requireAdmin(user: SessionUser) { if (!isAdmin(user)) throw new ActionError("Administrator access is required.", 403); }
+/** Administrator and Director: team management and executive oversight. */
+function requireAdmin(user: SessionUser) { if (!isAdmin(user)) throw new ActionError("Administrator or Director access is required.", 403); }
 
 type NewLine = { accountId: string; debit: number; credit: number; memo: string };
+type AccountRow = { id: string; category: string; isActive: boolean };
 
-async function createTransaction(body: Record<string, unknown>, user: SessionUser) {
-  requireWriter(user);
-  const type = text(body.type, 20, "Transaction type");
-  if (!["income", "expense", "transfer", "journal"].includes(type)) throw new ActionError("Invalid transaction type.");
-  const date = validDate(body.date);
-  const description = text(body.description, 500, "Description");
-  const payee = text(body.payee, 200, "Payee / source", false);
-  const paymentMethod = text(body.paymentMethod || "Bank transfer", 50, "Payment method");
-  const status = body.saveAsDraft === true ? "draft" : "posted";
-  const accountRows = await db.select().from(accounts);
-  const accountMap = new Map(accountRows.map((account) => [account.id, account]));
-  const useAccount = (id: unknown, category: string | string[], label: string) => {
-    const account = accountMap.get(String(id));
+async function accountLookup() {
+  const rows = await db.select().from(accounts);
+  return new Map<string, AccountRow>(rows.map((row) => [row.id, row]));
+}
+
+/**
+ * Parses a transaction request into balanced journal lines, in cents.
+ * Shared by create and edit so a corrected entry is validated exactly like a new one.
+ */
+function buildLines(body: Record<string, unknown>, type: string, description: string, lookup: Map<string, AccountRow>): { lines: NewLine[]; totalCents: number } {
+  const resolveAccount = (id: unknown, category: string | string[], label: string) => {
+    const account = lookup.get(String(id));
     if (!account?.isActive || !(Array.isArray(category) ? category : [category]).includes(account.category)) {
       throw new ActionError(`Select a valid ${label}.`);
     }
@@ -66,7 +73,7 @@ async function createTransaction(body: Record<string, unknown>, user: SessionUse
     if (!Array.isArray(input) || input.length < 2 || input.length > 20) throw new ActionError("A journal entry requires 2 to 20 lines.");
     lines = input.map((item: unknown, index: number) => {
       const row = item as Record<string, unknown>;
-      const accountId = useAccount(row?.accountId, ["asset", "liability", "equity", "income", "expense"], `account on line ${index + 1}`);
+      const accountId = resolveAccount(row?.accountId, ACCOUNT_CATEGORIES, `account on line ${index + 1}`);
       const debit = moneyCents(row?.debit || "0", `Debit on line ${index + 1}`, true);
       const credit = moneyCents(row?.credit || "0", `Credit on line ${index + 1}`, true);
       if ((debit === 0) === (credit === 0)) throw new ActionError(`Enter either a debit or a credit on line ${index + 1}.`);
@@ -75,16 +82,16 @@ async function createTransaction(body: Record<string, unknown>, user: SessionUse
   } else {
     const value = moneyCents(body.amount, "Amount");
     if (type === "income") {
-      const categoryId = useAccount(body.categoryAccountId, "income", "income account");
-      const cashId = useAccount(body.cashAccountId, "asset", "deposit account");
+      const categoryId = resolveAccount(body.categoryAccountId, "income", "income account");
+      const cashId = resolveAccount(body.cashAccountId, "asset", "deposit account");
       lines = [{ accountId: cashId, debit: value, credit: 0, memo: "Funds received" }, { accountId: categoryId, debit: 0, credit: value, memo: description }];
     } else if (type === "expense") {
-      const categoryId = useAccount(body.categoryAccountId, "expense", "expense account");
-      const cashId = useAccount(body.cashAccountId, "asset", "payment account");
+      const categoryId = resolveAccount(body.categoryAccountId, "expense", "expense account");
+      const cashId = resolveAccount(body.cashAccountId, "asset", "payment account");
       lines = [{ accountId: categoryId, debit: value, credit: 0, memo: description }, { accountId: cashId, debit: 0, credit: value, memo: "Payment made" }];
     } else {
-      const fromId = useAccount(body.fromAccountId, "asset", "source account");
-      const toId = useAccount(body.toAccountId, "asset", "destination account");
+      const fromId = resolveAccount(body.fromAccountId, "asset", "source account");
+      const toId = resolveAccount(body.toAccountId, "asset", "destination account");
       if (fromId === toId) throw new ActionError("Source and destination accounts must differ.");
       lines = [{ accountId: toId, debit: value, credit: 0, memo: "Transfer in" }, { accountId: fromId, debit: 0, credit: value, memo: "Transfer out" }];
     }
@@ -92,9 +99,30 @@ async function createTransaction(body: Record<string, unknown>, user: SessionUse
   const debitTotal = lines.reduce((sum, line) => sum + line.debit, 0);
   const creditTotal = lines.reduce((sum, line) => sum + line.credit, 0);
   if (debitTotal !== creditTotal || debitTotal <= 0) throw new ActionError("Journal entry must balance: total debits must equal total credits.");
+  return { lines, totalCents: debitTotal };
+}
+
+/** Fields common to creating and editing a transaction. */
+function parseTransactionFields(body: Record<string, unknown>) {
+  const type = text(body.type, 20, "Transaction type");
+  if (!["income", "expense", "transfer", "journal"].includes(type)) throw new ActionError("Invalid transaction type.");
+  return {
+    type,
+    date: validDate(body.date),
+    description: text(body.description, 500, "Description"),
+    payee: text(body.payee, 200, "Payee / source", false),
+    paymentMethod: text(body.paymentMethod || "Bank transfer", 50, "Payment method"),
+  };
+}
+
+async function createTransaction(body: Record<string, unknown>, user: SessionUser) {
+  requireWriter(user);
+  const fields = parseTransactionFields(body);
+  const status = body.saveAsDraft === true ? "draft" : "posted";
+  const { lines, totalCents } = buildLines(body, fields.type, fields.description, await accountLookup());
   const result = await db.transaction(async (tx) => {
     const [record] = await tx.insert(transactions).values({
-      reference: reference(date), date, description, type, status, payee, paymentMethod,
+      reference: reference(fields.date), ...fields, status,
       createdBy: user.id, postedAt: status === "posted" ? new Date() : null,
     }).returning({ id: transactions.id, reference: transactions.reference });
     await tx.insert(journalLines).values(lines.map((line) => ({
@@ -104,11 +132,63 @@ async function createTransaction(body: Record<string, unknown>, user: SessionUse
     await tx.insert(auditLogs).values({
       actorId: user.id, action: status === "draft" ? "transaction.drafted" : "transaction.posted",
       entity: "transaction", entityId: record.id,
-      details: `${record.reference} · ${description} · NGN ${asMoney(debitTotal)}`,
+      details: `${record.reference} · ${fields.description} · NGN ${asMoney(totalCents)}`,
     });
     return record;
   });
   return { message: status === "draft" ? "Transaction saved as draft." : "Transaction posted to the ledger.", ...result };
+}
+
+/**
+ * Corrects a draft entry in place. Posted entries are deliberately excluded —
+ * they are reversed instead, so the ledger keeps its full history.
+ */
+async function updateTransaction(body: Record<string, unknown>, user: SessionUser) {
+  requireWriter(user);
+  const id = text(body.id, 50, "Transaction ID");
+  // Status is checked before the payload so a posted entry always answers 409,
+  // and so an uneditable entry never triggers a pointless account lookup.
+  const [existing] = await db.select().from(transactions).where(eq(transactions.id, id)).limit(1);
+  if (!existing) throw new ActionError("Transaction not found.", 404);
+  if (existing.status !== "draft") throw new ActionError("Only draft entries can be edited. Reverse a posted entry to correct it.", 409);
+  const fields = parseTransactionFields(body);
+  const { lines, totalCents } = buildLines(body, fields.type, fields.description, await accountLookup());
+  return db.transaction(async (tx) => {
+    const [record] = await tx.select().from(transactions).where(eq(transactions.id, id)).for("update").limit(1);
+    // Re-checked under the row lock in case it was posted meanwhile.
+    if (!record || record.status !== "draft") throw new ActionError("Only draft entries can be edited. Reverse a posted entry to correct it.", 409);
+    await tx.update(transactions).set(fields).where(eq(transactions.id, id));
+    await tx.delete(journalLines).where(eq(journalLines.transactionId, id));
+    await tx.insert(journalLines).values(lines.map((line) => ({
+      transactionId: id, accountId: line.accountId,
+      debit: asMoney(line.debit), credit: asMoney(line.credit), memo: line.memo,
+    })));
+    await tx.insert(auditLogs).values({
+      actorId: user.id, action: "transaction.updated", entity: "transaction", entityId: id,
+      details: `${record.reference} draft corrected · ${fields.description} · NGN ${asMoney(totalCents)}`,
+    });
+    return { message: "Draft entry updated." };
+  });
+}
+
+/** Removes a draft that was never posted. Posted entries can only be reversed. */
+async function deleteTransaction(body: Record<string, unknown>, user: SessionUser) {
+  requireWriter(user);
+  const id = text(body.id, 50, "Transaction ID");
+  const [existing] = await db.select().from(transactions).where(eq(transactions.id, id)).limit(1);
+  if (!existing) throw new ActionError("Transaction not found.", 404);
+  if (existing.status !== "draft") throw new ActionError("Only draft entries can be deleted. Reverse a posted entry to correct it.", 409);
+  return db.transaction(async (tx) => {
+    const [record] = await tx.select().from(transactions).where(eq(transactions.id, id)).for("update").limit(1);
+    if (!record || record.status !== "draft") throw new ActionError("Only draft entries can be deleted. Reverse a posted entry to correct it.", 409);
+    await tx.delete(journalLines).where(eq(journalLines.transactionId, id));
+    await tx.delete(transactions).where(eq(transactions.id, id));
+    await tx.insert(auditLogs).values({
+      actorId: user.id, action: "transaction.deleted", entity: "transaction", entityId: id,
+      details: `${record.reference} draft discarded · ${record.description}`,
+    });
+    return { message: "Draft entry deleted." };
+  });
 }
 
 async function postTransaction(body: Record<string, unknown>, user: SessionUser) {
@@ -151,7 +231,7 @@ async function reverseTransaction(body: Record<string, unknown>, user: SessionUs
 }
 
 async function saveBudget(body: Record<string, unknown>, user: SessionUser) {
-  requireAdmin(user);
+  requireWriter(user);
   const accountId = text(body.accountId, 50, "Expense account");
   const allocated = moneyCents(body.allocated, "Allocation", true);
   const [account] = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
@@ -166,12 +246,12 @@ async function saveBudget(body: Record<string, unknown>, user: SessionUser) {
 }
 
 async function createAccount(body: Record<string, unknown>, user: SessionUser) {
-  requireAdmin(user);
+  requireWriter(user);
   const code = text(body.code, 12, "Account code");
   if (!/^\d{3,12}$/.test(code)) throw new ActionError("Account code must contain 3 to 12 digits.");
   const name = text(body.name, 160, "Account name");
   const category = text(body.category, 20, "Category");
-  if (!["asset", "liability", "equity", "income", "expense"].includes(category)) throw new ActionError("Invalid account category.");
+  if (!ACCOUNT_CATEGORIES.includes(category)) throw new ActionError("Invalid account category.");
   const description = text(body.description, 500, "Description", false);
   const duplicate = await db.select({ id: accounts.id }).from(accounts).where(eq(accounts.code, code)).limit(1);
   if (duplicate.length) throw new ActionError("This account code is already in use.");
@@ -180,6 +260,39 @@ async function createAccount(body: Record<string, unknown>, user: SessionUser) {
     await tx.insert(auditLogs).values({ actorId: user.id, action: "account.created", entity: "account", entityId: created.id, details: `${code} · ${name} (${category})` });
   });
   return { message: "Account added to the chart of accounts." };
+}
+
+/**
+ * Corrects an account's details. The category of an account that already carries
+ * ledger lines is locked, because reports classify income and expenditure by it —
+ * changing it would silently rewrite historical statements.
+ */
+async function updateAccount(body: Record<string, unknown>, user: SessionUser) {
+  requireWriter(user);
+  const id = text(body.id, 50, "Account");
+  const [account] = await db.select().from(accounts).where(eq(accounts.id, id)).limit(1);
+  if (!account) throw new ActionError("Account not found.", 404);
+  const code = text(body.code, 12, "Account code");
+  if (!/^\d{3,12}$/.test(code)) throw new ActionError("Account code must contain 3 to 12 digits.");
+  const name = text(body.name, 160, "Account name");
+  const category = text(body.category, 20, "Category");
+  if (!ACCOUNT_CATEGORIES.includes(category)) throw new ActionError("Invalid account category.");
+  const description = text(body.description, 500, "Description", false);
+  const isActive = body.isActive === undefined ? account.isActive : body.isActive === true;
+  const clash = await db.select({ id: accounts.id }).from(accounts).where(and(eq(accounts.code, code), ne(accounts.id, id))).limit(1);
+  if (clash.length) throw new ActionError("This account code is already in use.");
+  if (category !== account.category) {
+    const [used] = await db.select({ id: journalLines.id }).from(journalLines).where(eq(journalLines.accountId, id)).limit(1);
+    if (used) throw new ActionError("This account already has ledger entries, so its category cannot change. Create a new account for the other category.", 409);
+  }
+  await db.transaction(async (tx) => {
+    await tx.update(accounts).set({ code, name, category, description, isActive }).where(eq(accounts.id, id));
+    await tx.insert(auditLogs).values({
+      actorId: user.id, action: "account.updated", entity: "account", entityId: id,
+      details: `${account.code} ${account.name} → ${code} · ${name} (${category})${isActive === account.isActive ? "" : isActive ? " · reactivated" : " · deactivated"}`,
+    });
+  });
+  return { message: "Account updated." };
 }
 
 function validatePassword(password: string) {
@@ -194,14 +307,16 @@ async function createUser(body: Record<string, unknown>, user: SessionUser) {
   const email = text(body.email, 255, "Email").toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new ActionError("Enter a valid email address.");
   const role = text(body.role, 20, "Role");
-  if (!["admin", "accountant", "viewer"].includes(role)) throw new ActionError("Invalid role.");
+  if (!assignableRoles.includes(role as never)) throw new ActionError("Invalid role.");
+  // A Director manages the team, but only an Administrator can create another Administrator.
+  if (role === "admin" && !isOwner(user.role)) throw new ActionError("Only an Administrator can create another Administrator account.", 403);
   const password = text(body.password, 128, "Password");
   validatePassword(password);
   const existing = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
   if (existing.length) throw new ActionError("A user with this email already exists.");
   await db.transaction(async (tx) => {
     const [created] = await tx.insert(users).values({ fullName, email, role, passwordHash: hashPassword(password) }).returning({ id: users.id });
-    await tx.insert(auditLogs).values({ actorId: user.id, action: "user.created", entity: "user", entityId: created.id, details: `${fullName} · ${email} · ${role}` });
+    await tx.insert(auditLogs).values({ actorId: user.id, action: "user.created", entity: "user", entityId: created.id, details: `${fullName} · ${email} · ${roleLabel[role as keyof typeof roleLabel]}` });
   });
   return { message: "Team member added successfully." };
 }
@@ -212,12 +327,25 @@ async function toggleUser(body: Record<string, unknown>, user: SessionUser) {
   if (id === user.id) throw new ActionError("You cannot deactivate your own account.");
   const [target] = await db.select().from(users).where(eq(users.id, id)).limit(1);
   if (!target) throw new ActionError("User not found.", 404);
+  if (normaliseRole(target.role) === "admin" && !isOwner(user.role)) {
+    throw new ActionError("Only an Administrator can change an Administrator account.", 403);
+  }
   await db.transaction(async (tx) => {
     await tx.update(users).set({ isActive: !target.isActive }).where(eq(users.id, id));
     if (target.isActive) await tx.delete(sessions).where(eq(sessions.userId, id));
     await tx.insert(auditLogs).values({ actorId: user.id, action: target.isActive ? "user.deactivated" : "user.activated", entity: "user", entityId: id, details: `${target.fullName} (${target.email})` });
   });
   return { message: `User ${target.isActive ? "deactivated" : "activated"}.` };
+}
+
+/** Self-service name correction, available to every signed-in role. */
+async function updateProfile(body: Record<string, unknown>, user: SessionUser) {
+  const fullName = text(body.fullName, 160, "Full name");
+  await db.transaction(async (tx) => {
+    await tx.update(users).set({ fullName }).where(eq(users.id, user.id));
+    await tx.insert(auditLogs).values({ actorId: user.id, action: "user.profile_updated", entity: "user", entityId: user.id, details: `Display name set to ${fullName}` });
+  });
+  return { message: "Profile updated." };
 }
 
 async function changePassword(body: Record<string, unknown>, user: SessionUser) {
@@ -257,12 +385,16 @@ export async function POST(request: Request) {
     let result;
     switch (body.action) {
       case "createTransaction": result = await createTransaction(body, user); break;
+      case "updateTransaction": result = await updateTransaction(body, user); break;
+      case "deleteTransaction": result = await deleteTransaction(body, user); break;
       case "postTransaction": result = await postTransaction(body, user); break;
       case "reverseTransaction": result = await reverseTransaction(body, user); break;
       case "saveBudget": result = await saveBudget(body, user); break;
       case "createAccount": result = await createAccount(body, user); break;
+      case "updateAccount": result = await updateAccount(body, user); break;
       case "createUser": result = await createUser(body, user); break;
       case "toggleUser": result = await toggleUser(body, user); break;
+      case "updateProfile": result = await updateProfile(body, user); break;
       case "changePassword": result = await changePassword(body, user); break;
       default: throw new ActionError("Unknown action.");
     }

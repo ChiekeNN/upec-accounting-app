@@ -1,6 +1,7 @@
 import { db } from "@/db";
 import { accounts, auditLogs, budgets, journalLines, transactions, users } from "@/db/schema";
 import { desc, eq } from "drizzle-orm";
+import { normaliseRole } from "@/lib/roles";
 import type { AccountCategory, AccountItem, AuditItem, BudgetItem, DashboardItem, JournalLineItem, MonthItem, SessionUser, Snapshot, TransactionItem, TransactionStatus, TransactionType, UserItem } from "@/lib/types";
 
 const cents = (value: string | number) => Math.round(Number(value) * 100);
@@ -107,12 +108,13 @@ export async function getSnapshot(user: SessionUser): Promise<Snapshot> {
     }
   }
 
+  const accountsWithEntries = new Set(lineRows.map((row) => row.accountId));
   const accountItems: AccountItem[] = accountRows.map((row) => {
     const balance = accountBalance.get(row.id) || 0;
     return {
       id: row.id, code: row.code, name: row.name,
       category: row.category as AccountCategory, description: row.description,
-      isActive: row.isActive,
+      isActive: row.isActive, hasEntries: accountsWithEntries.has(row.id),
       balance: amount(["asset", "expense"].includes(row.category) ? balance : -balance),
     };
   });
@@ -142,7 +144,7 @@ export async function getSnapshot(user: SessionUser): Promise<Snapshot> {
     createdAt: row.createdAt.toISOString(),
   }));
   const userItems: UserItem[] = userRows.map((row) => ({
-    id: row.id, fullName: row.fullName, email: row.email, role: row.role as UserItem["role"],
+    id: row.id, fullName: row.fullName, email: row.email, role: normaliseRole(row.role),
     isActive: row.isActive, createdAt: row.createdAt.toISOString(),
   }));
   // The complete journal remains available to authenticated users for statements and exports.
