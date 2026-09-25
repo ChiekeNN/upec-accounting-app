@@ -1,13 +1,13 @@
-﻿node_modules/
+node_modules/
 dist/
+out/
+.next/
+.turbo/
 *.log
 .DS_Store
-.next/
-.next/
-node_modules/
-out/
-dist/
-.turbo/
+
+# Secrets — never commit
 .env
 .env.*
 !.env.example
+*.tsbuildinfo
