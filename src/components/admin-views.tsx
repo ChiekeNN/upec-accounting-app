@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Activity, ArrowDownToLine, ArrowRight, BookOpen, CalendarDays, Check, ChevronDown, CircleAlert, ClipboardList, Download, FileBarChart2, FileSpreadsheet, FileText, Fingerprint, KeyRound, Landmark, LockKeyhole, MonitorSmartphone, Plus, Printer, Search, Shield, ShieldCheck, UserRound, Users, Wallet } from "lucide-react";
-import type { Snapshot } from "@/lib/types";
+import { Activity, ArrowDownToLine, ArrowRight, BookOpen, CalendarDays, Check, ChevronDown, CircleAlert, ClipboardList, Download, FileBarChart2, FileSpreadsheet, FileText, Fingerprint, KeyRound, Landmark, LockKeyhole, MonitorSmartphone, PencilLine, Plus, Printer, Search, Shield, ShieldCheck, UserRound, Users, Wallet } from "lucide-react";
+import type { Role, Snapshot } from "@/lib/types";
+import { roleDescription, roleLabel, roleSummary } from "@/lib/roles";
 import { buildReport, type ReportType } from "@/lib/reporting";
 import { EmptyState, formatDateTime, formatMoney, initials, PageIntro, reportUrl } from "@/components/finance-ui";
 import type { InstallWindow } from "@/components/pwa-register";
@@ -41,13 +42,33 @@ export function AuditView({ data }: { data: Snapshot }) {
   </div>;
 }
 
-const roleDescription: Record<string, string> = { admin: "Full access to finance, budgets and team management", accountant: "Post transactions and manage accounting records", viewer: "Read-only access to dashboards and reports" };
+const roleCards: { role: Role; icon: typeof ShieldCheck }[] = [
+  { role: "admin", icon: ShieldCheck },
+  { role: "director", icon: Landmark },
+  { role: "finance_officer", icon: FileSpreadsheet },
+  { role: "viewer", icon: UserRound },
+];
 export function TeamView({ data, onAdd, onAction, working }: { data: Snapshot; onAdd: () => void; onAction: Action; working: boolean }) {
   return <div><PageIntro eyebrow="ADMINISTRATION  /  TEAM ACCESS" title="Team & permissions" subtitle="The right access for the right people, with clear accountability." actions={<button className="btn btn-primary" onClick={onAdd}><Plus size={18} /> Add team member</button>} />
-    <div className="team-roles"><div><span className="team-role-icon admin"><ShieldCheck size={20} /></span><strong>Administrator</strong><p>Full financial and access control</p></div><div><span className="team-role-icon accountant"><FileSpreadsheet size={20} /></span><strong>Accountant</strong><p>Record and post transactions</p></div><div><span className="team-role-icon viewer"><UserRound size={20} /></span><strong>Viewer</strong><p>View records and reports</p></div></div>
-    <section className="panel table-panel"><div className="table-toolbar"><div className="table-toolbar-heading"><h2>Workspace members</h2><span className="count-badge">{data.users.length}</span></div><span className="table-subtle"><Users size={16} /> Role-based access</span></div><div className="table-scroll"><table className="data-table team-table"><thead><tr><th>Team member</th><th>Role</th><th>Access</th><th>Joined</th><th>Status</th><th className="align-right">Action</th></tr></thead><tbody>{data.users.map((member) => <tr key={member.id}><td><div className="team-person"><span>{initials(member.fullName)}</span><div><strong>{member.fullName}{member.id === data.user.id && <em>you</em>}</strong><small>{member.email}</small></div></div></td><td><span className={`role-pill role-${member.role}`}>{member.role}</span></td><td className="muted-cell role-description">{roleDescription[member.role]}</td><td className="muted-cell">{new Date(member.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</td><td><span className={`member-status ${member.isActive ? "enabled" : "disabled"}`}><span />{member.isActive ? "Active" : "Inactive"}</span></td><td className="align-right">{member.id !== data.user.id && <button disabled={working} className="table-link" onClick={() => onAction({ action: "toggleUser", id: member.id })}>{member.isActive ? "Deactivate" : "Activate"}</button>}</td></tr>)}</tbody></table></div></section>
+    <div className="team-roles">{roleCards.map(({ role, icon: Icon }) => <div key={role}><span className={`team-role-icon ${role}`}><Icon size={20} /></span><strong>{roleLabel[role]}</strong><p>{roleSummary[role]}</p></div>)}</div>
+    <section className="panel table-panel"><div className="table-toolbar"><div className="table-toolbar-heading"><h2>Workspace members</h2><span className="count-badge">{data.users.length}</span></div><span className="table-subtle"><Users size={16} /> Role-based access</span></div><div className="table-scroll"><table className="data-table team-table"><thead><tr><th>Team member</th><th>Role</th><th>Access</th><th>Joined</th><th>Status</th><th className="align-right">Action</th></tr></thead><tbody>{data.users.map((member) => <tr key={member.id}><td><div className="team-person"><span>{initials(member.fullName)}</span><div><strong>{member.fullName}{member.id === data.user.id && <em>you</em>}</strong><small>{member.email}</small></div></div></td><td><span className={`role-pill role-${member.role}`}>{roleLabel[member.role]}</span></td><td className="muted-cell role-description">{roleDescription[member.role]}</td><td className="muted-cell">{new Date(member.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</td><td><span className={`member-status ${member.isActive ? "enabled" : "disabled"}`}><span />{member.isActive ? "Active" : "Inactive"}</span></td><td className="align-right">{member.id !== data.user.id && <button disabled={working} className="table-link" onClick={() => onAction({ action: "toggleUser", id: member.id })}>{member.isActive ? "Deactivate" : "Activate"}</button>}</td></tr>)}</tbody></table></div></section>
     <div className="team-note"><LockKeyhole size={17} /> Deactivating a member immediately revokes their active sessions. All historical entries retain their attribution.</div>
   </div>;
+}
+
+/**
+ * Self-service name correction. Rendered with `key={currentName}` by its parent so
+ * a successful save remounts the card with the stored value instead of syncing
+ * local state inside an effect.
+ */
+function ProfileDetailsCard({ currentName, onAction, working }: { currentName: string; onAction: Action; working: boolean }) {
+  const [fullName, setFullName] = useState(currentName);
+  const unchanged = !fullName.trim() || fullName.trim() === currentName;
+  async function updateProfile(event: FormEvent) {
+    event.preventDefault();
+    await onAction({ action: "updateProfile", fullName: fullName.trim() });
+  }
+  return <section className="panel settings-card"><div className="settings-card-header"><span className="settings-header-icon green"><PencilLine size={21} /></span><div><h2>Your details</h2><p>Correct your name as it appears on records and in the audit trail</p></div></div><form className="settings-password-form" onSubmit={updateProfile}><label>Full name<input value={fullName} onChange={(event) => setFullName(event.target.value)} maxLength={160} placeholder="Your full name" required /></label><p>Your email address and access role are managed by an Administrator under Team &amp; access.</p><button className="btn btn-primary" type="submit" disabled={working || unchanged}>{working ? "Saving..." : "Save details"}<ArrowRight size={17} /></button></form></section>;
 }
 
 export function SettingsView({ data, onAction, working }: { data: Snapshot; onAction: Action; working: boolean }) {
@@ -64,13 +85,15 @@ export function SettingsView({ data, onAction, working }: { data: Snapshot; onAc
     event.preventDefault();
     if (await onAction({ action: "changePassword", currentPassword, newPassword })) { setCurrentPassword(""); setNewPassword(""); }
   }
+
   async function installApp() {
     const prompt = (window as InstallWindow).upecInstallPrompt;
     if (prompt) { await prompt.prompt(); const choice = await prompt.userChoice; setInstallMessage(choice.outcome === "accepted" ? "App installation started." : "You can install later from your browser menu."); (window as InstallWindow).upecInstallPrompt = undefined; setInstallable(false); }
     else setInstallMessage("Use your browser menu and choose ‘Install app’ or ‘Add to Home Screen’. On iPhone, tap Share then Add to Home Screen.");
   }
   return <div><PageIntro eyebrow="WORKSPACE  /  SETTINGS" title="Settings" subtitle="Manage your profile, security and institutional workspace details." />
-    <div className="settings-grid"><div className="settings-main"><section className="panel settings-card"><div className="settings-card-header"><span className="settings-header-icon blue"><UserRound size={21} /></span><div><h2>Your profile</h2><p>Your identity in the UPEC accounting workspace</p></div></div><div className="settings-profile"><span className="settings-avatar">{initials(data.user.fullName)}</span><div><strong>{data.user.fullName}</strong><span>{data.user.email}</span><small>{data.user.role} access</small></div></div></section>
+    <div className="settings-grid"><div className="settings-main"><section className="panel settings-card"><div className="settings-card-header"><span className="settings-header-icon blue"><UserRound size={21} /></span><div><h2>Your profile</h2><p>Your identity in the UPEC accounting workspace</p></div></div><div className="settings-profile"><span className="settings-avatar">{initials(data.user.fullName)}</span><div><strong>{data.user.fullName}</strong><span>{data.user.email}</span><small>{roleLabel[data.user.role]} access</small></div></div></section>
+      <ProfileDetailsCard key={data.user.fullName} currentName={data.user.fullName} onAction={onAction} working={working} />
       <section className="panel settings-card"><div className="settings-card-header"><span className="settings-header-icon purple"><KeyRound size={21} /></span><div><h2>Change password</h2><p>Keep your account protected with a strong password</p></div></div><form className="settings-password-form" onSubmit={updatePassword}><label>Current password<input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} placeholder="Enter current password" required /></label><label>New password<input type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} placeholder="Create a strong password" minLength={10} required /></label><p>Use at least 10 characters with uppercase, lowercase, a number and a symbol. You will sign in again after updating.</p><button className="btn btn-primary" type="submit" disabled={working}>{working ? "Updating..." : "Update password"}<ArrowRight size={17} /></button></form></section></div>
       <div className="settings-side"><section className="panel settings-card"><div className="settings-card-header"><span className="settings-header-icon green"><Landmark size={21} /></span><div><h2>Institution</h2><p>Workspace information</p></div></div><div className="settings-details"><div><span>Organisation</span><strong>UPEC</strong></div><div><span>Parent institution</span><strong>University of Port Harcourt</strong></div><div><span>Location</span><strong>Choba, Port Harcourt, Rivers State</strong></div><div><span>Accounting / Vote Head</span><strong>520</strong></div><div><span>Financial year</span><strong>{data.fiscalYear}</strong></div><div><span>Base currency</span><strong>Nigerian Naira (NGN)</strong></div></div></section>
       <section className="panel settings-card install-card"><div className="settings-card-header"><span className="settings-header-icon blue"><MonitorSmartphone size={21} /></span><div><h2>Install on your device</h2><p>Access UPEC from your home screen</p></div></div><p>Install this secure web app on desktop, tablet or mobile for a focused, app-like experience.</p><button className="btn btn-secondary full-width" onClick={installApp}><ArrowDownToLine size={17} /> {installable ? "Install UPEC Accounting" : "How to install"}</button>{installMessage && <div className="install-message">{installMessage}</div>}</section>

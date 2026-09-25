@@ -1,7 +1,12 @@
 import { db } from "@/db";
 import { accounts, auditLogs, budgets, journalLines, transactions, users } from "@/db/schema";
 import { hashPassword } from "@/lib/auth";
-import { sql } from "drizzle-orm";
+import { bootstrapAccounts, isDemoMode } from "@/lib/bootstrap";
+import type { Role } from "@/lib/roles";
+import { roleLabel } from "@/lib/roles";
+import { eq, sql } from "drizzle-orm";
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 const chartOfAccounts = [
   ["1000", "Cash on Hand", "asset", "Petty cash and cash equivalents"],
@@ -33,31 +38,69 @@ function isoDate(year: number, month: number, day: number) {
   return new Date(Date.UTC(year, month, day)).toISOString().slice(0, 10);
 }
 
-/** Seeds illustrative data once. Set BOOTSTRAP_ADMIN_PASSWORD before deployment. */
-export async function ensureSeed() {
-  await db.transaction(async (tx) => {
-    await tx.execute(sql`select pg_advisory_xact_lock(5202026)`);
-    const existing = await tx.select({ id: accounts.id }).from(accounts).limit(1);
-    if (existing.length) return;
+interface Person { email: string; fullName: string; role: Role; id: string }
 
-    const [admin] = await tx.insert(users).values({
-      fullName: "Amaka Nwosu",
-      email: (process.env.BOOTSTRAP_ADMIN_EMAIL || "admin@upec.edu.ng").toLowerCase(),
-      passwordHash: hashPassword(process.env.BOOTSTRAP_ADMIN_PASSWORD || "UpecDemo@2026!"),
-      role: "admin",
+/**
+ * Creates the configured sign-in accounts.
+ *
+ * Runs on every request but is idempotent and deliberately non-destructive: an
+ * email that already exists is left completely alone, so a password somebody
+ * changed through Settings survives every later deploy. Only missing accounts
+ * are inserted, which is how the Director and Finance Officer sign-ins appear
+ * on a workspace that was seeded by an earlier build.
+ */
+async function ensurePeople(tx: Tx): Promise<Person[]> {
+  const people: Person[] = [];
+  for (const account of bootstrapAccounts()) {
+    const [existing] = await tx.select({ id: users.id }).from(users).where(eq(users.email, account.email)).limit(1);
+    if (existing) {
+      people.push({ email: account.email, fullName: account.fullName, role: account.role, id: existing.id });
+      continue;
+    }
+    const [created] = await tx.insert(users).values({
+      fullName: account.fullName,
+      email: account.email,
+      passwordHash: hashPassword(account.password),
+      role: account.role,
     }).returning({ id: users.id });
+    people.push({ email: account.email, fullName: account.fullName, role: account.role, id: created.id });
+    await tx.insert(auditLogs).values({
+      actorId: created.id, action: "user.created", entity: "user", entityId: created.id,
+      details: `${account.fullName} · ${account.email} · ${roleLabel[account.role]} (workspace bootstrap)`,
+    });
+  }
+  return people;
+}
 
-    const inserted = await tx.insert(accounts).values(chartOfAccounts.map(([code, name, category, description]) => ({
-      code, name, category, description,
-    }))).returning({ id: accounts.id, code: accounts.code });
-    const ids = Object.fromEntries(inserted.map((item) => [item.code, item.id]));
-    const year = new Date().getUTCFullYear();
-    const demoMode = !process.env.BOOTSTRAP_ADMIN_PASSWORD;
-    if (demoMode) {
-      await tx.insert(budgets).values(Object.entries(allocations).map(([code, allocated]) => ({
-        fiscalYear: year, accountId: ids[code], allocated: money(allocated), updatedBy: admin.id,
-      })));
+/** The person holding a role, or the first account as a fallback. */
+function personFor(people: Person[], role: Role): Person | undefined {
+  return people.find((person) => person.role === role) || people[0];
+}
 
+/** Creates the chart of accounts once, plus illustrative records in demo mode. */
+async function seedWorkspace(tx: Tx, people: Person[]) {
+  const administrator = personFor(people, "admin");
+  const director = personFor(people, "director") || administrator;
+  const financeOfficer = personFor(people, "finance_officer") || administrator;
+  if (!administrator) return;
+
+  const inserted = await tx.insert(accounts).values(chartOfAccounts.map(([code, name, category, description]) => ({
+    code, name, category, description,
+  }))).returning({ id: accounts.id, code: accounts.code });
+  const ids = Object.fromEntries(inserted.map((item) => [item.code, item.id]));
+  const year = new Date().getUTCFullYear();
+  const demoMode = isDemoMode();
+
+  // Allocations are illustrative, so they belong to demo mode only. A real
+  // deployment starts with no approved budget: the Director or Finance Officer
+  // enters the institution's actual figures in Budget monitoring.
+  if (demoMode) {
+    await tx.insert(budgets).values(Object.entries(allocations).map(([code, allocated]) => ({
+      fiscalYear: year, accountId: ids[code], allocated: money(allocated), updatedBy: director?.id ?? null,
+    })));
+  }
+
+  if (demoMode && financeOfficer) {
     const incomeAmounts = [3_200_000, 4_150_000, 3_650_000, 4_900_000, 5_600_000, 6_950_000];
     const expenseAmounts = [1_850_000, 2_425_000, 2_675_000, 2_850_000, 3_100_000, 3_925_000];
     const incomeDescriptions = [
@@ -104,7 +147,7 @@ export async function ensureSeed() {
           status: "posted",
           payee: entry.payee,
           paymentMethod: "Bank transfer",
-          createdBy: admin.id,
+          createdBy: financeOfficer.id,
           postedAt: new Date(),
         }).returning({ id: transactions.id });
         await tx.insert(journalLines).values(entry.kind === "income" ? [
@@ -116,10 +159,40 @@ export async function ensureSeed() {
         ]);
       }
     }
-    }
-    await tx.insert(auditLogs).values({
-      actorId: admin.id, action: "workspace.initialized", entity: "system",
-      details: demoMode ? "Chart of accounts, FY budget and illustrative opening records created" : "Institutional chart of accounts created; no illustrative financial records loaded",
-    });
+
+    // A draft left for the Director to approve, so the oversight area has content.
+    const [draft] = await tx.insert(transactions).values({
+      reference: `UPEC-${year}-DEMO-DRAFT`,
+      date: isoDate(now.getUTCFullYear(), now.getUTCMonth(), Math.min(9, now.getUTCDate())),
+      description: "Facilitator honoraria - pending Director approval",
+      type: "expense",
+      status: "draft",
+      payee: "Programme facilitators",
+      paymentMethod: "Bank transfer",
+      createdBy: financeOfficer.id,
+      postedAt: null,
+    }).returning({ id: transactions.id });
+    await tx.insert(journalLines).values([
+      { transactionId: draft.id, accountId: ids["5000"], debit: money(450_000), credit: "0.00", memo: "Facilitator honoraria" },
+      { transactionId: draft.id, accountId: ids["1010"], debit: "0.00", credit: money(450_000), memo: "Payment made" },
+    ]);
+  }
+
+  await tx.insert(auditLogs).values({
+    actorId: administrator.id, action: "workspace.initialized", entity: "system",
+    details: demoMode
+      ? "Chart of accounts, FY budget and illustrative opening records created"
+      : "Institutional chart of accounts created; no illustrative financial records or budget figures loaded",
+  });
+}
+
+/** Seeds the workspace once. Set BOOTSTRAP_ADMIN_PASSWORD before a real deployment. */
+export async function ensureSeed() {
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(5202026)`);
+    const people = await ensurePeople(tx);
+    const existing = await tx.select({ id: accounts.id }).from(accounts).limit(1);
+    if (existing.length) return;
+    await seedWorkspace(tx, people);
   });
 }

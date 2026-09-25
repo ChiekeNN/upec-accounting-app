@@ -2,22 +2,30 @@
 
 import { useState, type FormEvent } from "react";
 import { ArrowRight, Eye, EyeOff, LockKeyhole, ShieldCheck, Sparkles } from "lucide-react";
+import { DEMO_PASSWORD, type DemoAccount } from "@/lib/demo";
+import { roleLabel } from "@/lib/roles";
 
-export default function LoginScreen({ demoEnabled, demoEmail }: { demoEnabled: boolean; demoEmail: string }) {
+export default function LoginScreen({ demoAccounts }: { demoAccounts: DemoAccount[] }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const demoEnabled = demoAccounts.length > 0;
 
-  async function signIn(event?: FormEvent, demo = false) {
+  /** Signs in with the typed credentials, or one-click as a demo account. */
+  async function signIn(event?: FormEvent, demoEmail?: string) {
     event?.preventDefault();
     setLoading(true);
     setError("");
     try {
       const response = await fetch("/api/auth", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "login", email: demo ? demoEmail : email, password: demo ? "UpecDemo@2026!" : password }),
+        body: JSON.stringify({
+          action: "login",
+          email: demoEmail || email,
+          password: demoEmail ? DEMO_PASSWORD : password,
+        }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Unable to sign in.");
@@ -52,7 +60,17 @@ export default function LoginScreen({ demoEnabled, demoEmail }: { demoEnabled: b
           </form>
           {demoEnabled && <div className="demo-access">
             <div className="demo-access-icon"><Sparkles size={18} /></div>
-            <div><strong>Exploring the demo?</strong><span>Preview the full accounting workspace with sample records.</span><button type="button" onClick={() => signIn(undefined, true)} disabled={loading}>Open demo workspace <ArrowRight size={14} /></button></div>
+            <div className="demo-access-body">
+              <strong>Exploring the demo?</strong>
+              <span>Open the workspace with sample records as any of the demo roles.</span>
+              <div className="demo-account-list">
+                {demoAccounts.map((account) => <button type="button" key={account.email} className="demo-account" disabled={loading} onClick={() => signIn(undefined, account.email)}>
+                  <span className="demo-account-text"><strong>{roleLabel[account.role]}</strong><small>{account.email}</small></span>
+                  <span className="demo-account-go" aria-hidden="true"><ArrowRight size={14} /></span>
+                  <span className="visually-hidden">Sign in as {roleLabel[account.role]}, {account.email}</span>
+                </button>)}
+              </div>
+            </div>
           </div>}
           <div className="login-security"><ShieldCheck size={17} /><span>Protected access · Encrypted credentials · Activity monitored</span></div>
         </div>

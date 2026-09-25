@@ -8,6 +8,13 @@
       "when": 1790325326690,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1790331572024,
+      "tag": "0001_finance_officer_and_director_roles",
+      "breakpoints": true
     }
   ]
 }

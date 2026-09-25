@@ -3,7 +3,8 @@ import { cookies } from "next/headers";
 import { and, eq, gt } from "drizzle-orm";
 import { db } from "@/db";
 import { sessions, users } from "@/db/schema";
-import type { Role, SessionUser } from "@/lib/types";
+import { canEditRecords, hasAdminAccess, normaliseRole } from "@/lib/roles";
+import type { SessionUser } from "@/lib/types";
 
 const COOKIE_NAME = "upec_session";
 const SESSION_LENGTH = 7 * 24 * 60 * 60 * 1000;
@@ -43,7 +44,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
     .where(and(eq(sessions.tokenHash, tokenHash(token)), gt(sessions.expiresAt, new Date()))).limit(1);
   const user = rows[0];
   if (!user?.isActive) return null;
-  return { id: user.id, fullName: user.fullName, email: user.email, role: user.role as Role };
+  return { id: user.id, fullName: user.fullName, email: user.email, role: normaliseRole(user.role) };
 }
 
 export async function createSession(userId: string) {
@@ -79,11 +80,12 @@ export function isSameOrigin(request: Request): boolean {
 }
 
 export function canWrite(user: SessionUser) {
-  return user.role === "admin" || user.role === "accountant";
+  return canEditRecords(user.role);
 }
 
+/** Administrators and Directors: team management plus the oversight area. */
 export function isAdmin(user: SessionUser) {
-  return user.role === "admin";
+  return hasAdminAccess(user.role);
 }
 
 export function errorResponse(message: string, status = 400) {
