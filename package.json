@@ -6,7 +6,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "db:new": "npx --yes neon@latest claim create --file .env",
+    "gen:password": "node scripts/gen-password.mjs"
   },
   "dependencies": {
     "dotenv": "17.3.1",
